@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>内网 HTTPS 根证书更换顺序规划</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <h1>内网 HTTPS 根证书更换顺序规划</h1>
+  <p class="subtitle">
+    录入服务副本的新旧证书链与终端批次的新旧根证书包，求解每步只动一个副本
+    或一批终端、且任一核验时刻全部“批次 × 副本”均按域名验证通过的变更顺序。
+  </p>
+</header>
+
+<main>
+  <section class="card">
+    <div class="card-head">
+      <h2>1. 服务副本（最多 4 个，每个填新旧两份 PEM 证书链）</h2>
+      <button type="button" class="btn ghost" id="loadSample">载入证书样例</button>
+    </div>
+    <div id="replicas"></div>
+    <button type="button" class="btn small" id="addReplica">＋ 添加副本</button>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>2. 终端批次（最多 4 批，每批填新旧两份 PEM 根证书包）</h2>
+    </div>
+    <div id="batches"></div>
+    <button type="button" class="btn small" id="addBatch">＋ 添加终端批次</button>
+  </section>
+
+  <section class="card">
+    <h2>3. 过渡名额与求解</h2>
+    <div class="limit-row">
+      <label for="maxTransition">同时处于过渡态（新旧根包并集）的批次上限：</label>
+      <input type="number" id="maxTransition" min="0" max="4" step="1" value="3">
+      <span class="hint">0 表示不允许并集过渡，只能直接更换根包。</span>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn primary" id="solveBtn">求解变更顺序</button>
+      <span id="formError" class="error"></span>
+    </div>
+  </section>
+
+  <section id="result" class="card hidden">
+    <h2>4. 求解结果</h2>
+    <div id="resultBody"></div>
+  </section>
+</main>
+
+<template id="replicaTpl">
+  <div class="entity" data-role="replica">
+    <div class="entity-head">
+      <span class="entity-title">副本 <span class="idx"></span></span>
+      <label>名称 <input type="text" class="name" placeholder="svc-a"></label>
+      <label class="domain-label">域名 <input type="text" class="domain" placeholder="svc-a.internal.example"></label>
+      <button type="button" class="btn small danger remove">删除</button>
+    </div>
+    <div class="pem-grid">
+      <div>
+        <div class="pem-label">旧证书链 PEM（叶子 + 中间 CA，按序拼接）</div>
+        <textarea class="old_chain pem" rows="6" spellcheck="false"></textarea>
+        <div class="pem-summary" data-for="old_chain"></div>
+      </div>
+      <div>
+        <div class="pem-label">新证书链 PEM（叶子 + 中间 CA，按序拼接）</div>
+        <textarea class="new_chain pem" rows="6" spellcheck="false"></textarea>
+        <div class="pem-summary" data-for="new_chain"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="batchTpl">
+  <div class="entity" data-role="batch">
+    <div class="entity-head">
+      <span class="entity-title">批次 <span class="idx"></span></span>
+      <label>名称 <input type="text" class="name" placeholder="终端批次1"></label>
+      <button type="button" class="btn small danger remove">删除</button>
+    </div>
+    <div class="pem-grid">
+      <div>
+        <div class="pem-label">旧根证书包 PEM（一个或多个信任根）</div>
+        <textarea class="old_bundle pem" rows="5" spellcheck="false"></textarea>
+        <div class="pem-summary" data-for="old_bundle"></div>
+      </div>
+      <div>
+        <div class="pem-label">新根证书包 PEM（一个或多个信任根）</div>
+        <textarea class="new_bundle pem" rows="5" spellcheck="false"></textarea>
+        <div class="pem-summary" data-for="new_bundle"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+const STATE_LABELS = {{ state_labels | tojson }};
+const CHAIN_LABELS = {{ chain_labels | tojson }};
+const BUNDLE_MODE_LABELS = {{ bundle_mode_labels | tojson }};
+const SAMPLE = {{ sample | tojson }};
+const MAX_ROWS = 4;
+
+const replicasEl = document.getElementById('replicas');
+const batchesEl = document.getElementById('batches');
+
+function renumber(container) {
+  [...container.children].forEach((el, i) => {
+    el.querySelector('.idx').textContent = i + 1;
+    el.querySelector('.remove').disabled = container.children.length <= 1;
+  });
+}
+
+function addEntity(kind, data) {
+  const container = kind === 'replica' ? replicasEl : batchesEl;
+  if (container.children.length >= MAX_ROWS) return;
+  const tpl = document.getElementById(kind === 'replica' ? 'replicaTpl' : 'batchTpl');
+  const node = tpl.content.firstElementChild.cloneNode(true);
+  container.appendChild(node);
+  node.querySelector('.remove').addEventListener('click', () => {
+    node.remove();
+    renumber(container);
+  });
+  if (data) {
+    node.querySelector('.name').value = data.name || '';
+    if (kind === 'replica') node.querySelector('.domain').value = data.domain || '';
+    for (const field of ['old_chain', 'new_chain', 'old_bundle', 'new_bundle']) {
+      if (data[field]) {
+        const ta = node.querySelector('.' + field);
+        if (ta) ta.value = data[field];
+      }
+    }
+    [...node.querySelectorAll('textarea.pem')].forEach(refreshSummary);
+  }
+  renumber(container);
+}
+
+async function refreshSummary(textarea) {
+  const pem = textarea.value.trim();
+  const summaryEl = textarea.parentElement.querySelector('.pem-summary');
+  if (!pem) { summaryEl.textContent = ''; summaryEl.className = 'pem-summary'; return; }
+  const kind = textarea.classList.contains('old_chain') || textarea.classList.contains('new_chain')
+    ? 'chain' : 'bundle';
+  const resp = await fetch('/api/summaries', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({kind, pem})
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    const s = data.summary;
+    summaryEl.className = 'pem-summary ok';
+    if (kind === 'chain') {
+      summaryEl.textContent = `✓ 叶子 CN=${s.common_name || '-'}；SAN=${(s.sans || []).join(', ') || '-'}；`
+        + `链长 ${s.chain_length}；有效期至 ${s.not_valid_after}`;
+    } else {
+      summaryEl.textContent = `✓ 根包内含 ${s.count} 个证书：${s.subjects.join(' | ')}`;
+    }
+  } else {
+    summaryEl.className = 'pem-summary bad';
+    summaryEl.textContent = '✗ ' + data.error;
+  }
+}
+
+document.getElementById('addReplica').addEventListener('click', () => addEntity('replica'));
+document.getElementById('addBatch').addEventListener('click', () => addEntity('batch'));
+
+document.getElementById('loadSample').addEventListener('click', () => {
+  if (!SAMPLE) { alert('样例文件不存在（samples/sample.json）'); return; }
+  replicasEl.innerHTML = '';
+  batchesEl.innerHTML = '';
+  SAMPLE.replicas.forEach(r => addEntity('replica', r));
+  SAMPLE.batches.forEach(b => addEntity('batch', b));
+  document.getElementById('maxTransition').value = SAMPLE.max_transition ?? 2;
+});
+
+function collect() {
+  const rows = (container, fields) => [...container.children].map(node => {
+    const row = {name: node.querySelector('.name').value.trim()};
+    const domainEl = node.querySelector('.domain');
+    if (domainEl) row.domain = domainEl.value.trim();
+    fields.forEach(f => { row[f] = node.querySelector('.' + f).value; });
+    return row;
+  });
+  return {
+    replicas: rows(replicasEl, ['old_chain', 'new_chain']),
+    batches: rows(batchesEl, ['old_bundle', 'new_bundle']),
+    max_transition: parseInt(document.getElementById('maxTransition').value, 10)
+  };
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderViolationTable(violations, title) {
+  if (!violations.length) return '';
+  return `<h3>${title}</h3>
+  <table class="diag">
+    <thead><tr><th>终端批次</th><th>服务副本</th><th>域名</th><th>场景</th><th>openssl 失败原因</th></tr></thead>
+    <tbody>${violations.map(v => `<tr>
+      <td>${esc(v.batch_name)}</td><td>${esc(v.replica_name)}</td>
+      <td>${esc(v.domain)}</td>
+      <td>${esc(CHAIN_LABELS[v.chain_state])} × ${esc(BUNDLE_MODE_LABELS[v.bundle_mode])}</td>
+      <td class="reason">${esc(v.reason)}</td></tr>`).join('')}</tbody>
+  </table>`;
+}
+
+function renderBlockers(blockers) {
+  if (!blockers.length) return '';
+  return `<h3>无法通过验证的终端批次 × 副本明细</h3>
+  <table class="diag">
+    <thead><tr><th>终端批次</th><th>服务副本</th><th>域名</th><th>失败的核验组合（共 6 种）</th></tr></thead>
+    <tbody>${blockers.map(b => `<tr>
+      <td>${esc(b.batch_name)}</td><td>${esc(b.replica_name)}</td><td>${esc(b.domain)}</td>
+      <td><ul class="cells">${b.failed_cells.map(c =>
+        `<li class="${c.ok ? 'ok' : 'bad'}">${esc(c.chain_label)} × ${esc(c.bundle_label)}：
+        <span class="reason">${esc(c.reason)}</span></li>`).join('')}</ul>
+        ${b.any_ok ? '' : '<div class="tag danger">该配对在任何根包下均无法验证</div>'}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+function renderMatrix(matrix, replicaNames, batchNames) {
+  const combos = [];
+  for (const cs of [0, 1]) for (const bm of [0, 2, 1]) combos.push([cs, bm]);
+  const head = combos.map(([cs, bm]) =>
+    `<th>${esc(CHAIN_LABELS[cs])}<br>× ${esc(BUNDLE_MODE_LABELS[bm])}</th>`).join('');
+  const rows = matrix.map((row, i) => `<tr><th class="rh">${esc(replicaNames[i])}</th>`
+    + row.map((cells, j) => `<td title="${esc(batchNames[j])}">`
+      + combos.map(([cs, bm]) => {
+          const c = cells[`${cs}-${bm}`];
+          return `<span class="cell ${c.ok ? 'ok' : 'bad'}">${c.ok ? '✓' : '✗'}</span>`;
+        }).join('')
+      + '</td>').join('') + '</tr>').join('');
+  return `<h3>核验矩阵（行=副本，列=链 × 根包组合；每格内顺序对应表头）</h3>
+  <div class="matrix-scroll"><table class="matrix">
+    <thead><tr><th></th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+  <p class="hint">✗ 可在上方明细表中查看 openssl 给出的具体原因。</p>`;
+}
+
+function renderPlan(data) {
+  const steps = data.plan.map(s => `<li class="step">
+    <div class="step-no">第 ${s.step_no} 步</div>
+    <div class="step-text">${esc(s.text)}</div>
+    <div class="step-state">动作后：副本链 [${s.chains_label.map(esc).join('，')}]
+      ｜ 终端根包 [${s.bundles_label.map(esc).join('，')}]</div>
+    <div class="step-checks">本步核验 ${s.checks_passed}/${s.checks_total} 个“批次×副本”组合全部通过</div>
+  </li>`).join('');
+  return `<div class="banner ok"><strong>${esc(data.message)}</strong></div>
+  <ol class="plan">${steps}</ol>`;
+}
+
+document.getElementById('solveBtn').addEventListener('click', async () => {
+  const errEl = document.getElementById('formError');
+  errEl.textContent = '';
+  let payload;
+  try { payload = collect(); } catch (e) { errEl.textContent = e.message; return; }
+  const btn = document.getElementById('solveBtn');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/plan', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    const resultEl = document.getElementById('result');
+    const body = document.getElementById('resultBody');
+    resultEl.classList.remove('hidden');
+    if (!data.ok) {
+      body.innerHTML = `<div class="banner bad"><strong>输入有误：</strong>${esc(data.error)}</div>`;
+      return;
+    }
+    let html = '';
+    if (data.status === 'plan') {
+      html += renderPlan(data);
+    } else if (data.status === 'insufficient_quota') {
+      html += `<div class="banner warn"><strong>无解（过渡名额不足）。</strong>${esc(data.message)}<br>
+        请把“同时过渡批次上限”调大到至少 <strong>${data.min_required}</strong> 后重新求解。</div>`;
+    } else {
+      html += `<div class="banner bad"><strong>无解（证书材料无法通过验证）。</strong>${esc(data.message)}</div>`;
+      html += renderViolationTable(data.initial_violations, '现状核验失败项（旧证书链 × 旧根包）');
+      html += renderViolationTable(data.target_violations, '目标态核验失败项（新证书链 × 新根包）');
+      html += renderBlockers(data.blocker_pairs);
+    }
+    html += renderMatrix(data.matrix, data.replica_names, data.batch_names);
+    body.innerHTML = html;
+    resultEl.scrollIntoView({behavior: 'smooth'});
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 初始给一行空表单，并在有样例时自动载入
+addEntity('replica');
+addEntity('batch');
+if (SAMPLE) document.getElementById('loadSample').click();
+</script>
+</body>
+</html>
