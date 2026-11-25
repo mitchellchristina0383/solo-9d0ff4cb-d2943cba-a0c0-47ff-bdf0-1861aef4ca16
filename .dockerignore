@@ -1,0 +1,11 @@
+.git
+.gitignore
+.pytest_cache
+**/__pycache__
+**/*.pyc
+.venv
+samples_test
+.prepare-status.json
+samples/.prepare-status.json
+*.md
+tests

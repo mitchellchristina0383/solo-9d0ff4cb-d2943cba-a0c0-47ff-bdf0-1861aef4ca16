@@ -12,7 +12,8 @@
   bundles/      终端旧根包、新根包、并集过渡包
   sample.json   页面表单预填数据
 
-样例只用于本地演示：私钥同样落盘，但全部为本地临时测试用途。
+样例只用于本地演示：私钥仅在内存中生成与使用，不会落盘；请勿把样例证书
+用于任何真实环境。
 """
 
 from __future__ import annotations
@@ -229,13 +230,31 @@ def generate(out_dir: str | os.PathLike = "samples") -> pathlib.Path:
         )
 
     meta_path = out / "sample.json"
-    meta_path.write_text(json.dumps(sample, ensure_ascii=False, indent=2), "utf-8")
+    # 原子替换，避免生成中途失败/被杀后留下截断的 sample.json。
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_meta = meta_path.with_name(meta_path.name + ".tmp")
+    tmp_meta.write_text(
+        json.dumps(sample, ensure_ascii=False, indent=2), "utf-8"
+    )
+    os.replace(tmp_meta, meta_path)
     return meta_path
 
 
 if __name__ == "__main__":
     import sys
 
-    target = sys.argv[1] if len(sys.argv) > 1 else "samples"
+    args = [a for a in sys.argv[1:] if a != "--ensure"]
+    target = args[0] if args else "samples"
+
+    if "--ensure" in sys.argv[1:]:
+        # 启动语义：可用 sample.json 则沿用并对齐 PEM，缺失 / 排不出才重签。
+        # 这里延迟导入，避免“强制重新生成”的常规用法依赖 Flask 之外的模块顺序。
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+        from app.preparation import prepare_samples
+
+        result = prepare_samples(target)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0 if result.get("status") == "ok" else 1)
+
     path = generate(target)
     print(f"样例证书已生成: {path.resolve()}")

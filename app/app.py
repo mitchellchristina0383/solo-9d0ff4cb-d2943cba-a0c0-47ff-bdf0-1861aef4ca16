@@ -8,6 +8,7 @@ import pathlib
 
 from flask import Flask, jsonify, render_template, request
 
+from . import preparation
 from .certutil import PemError, bundle_summary, leaf_summary
 from .planner import (
     BUNDLE_MODE_LABEL,
@@ -17,18 +18,46 @@ from .planner import (
 )
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
+# 保留模块级默认路径以兼容旧引用；实际请求时通过 preparation 动态解析，
+# 这样 SAMPLES_DIR 环境变量 / 挂载目录在导入后设置也能生效。
 SAMPLE_PATH = BASE_DIR / "samples" / "sample.json"
+
+
+def _current_sample_path() -> pathlib.Path:
+    # 运行 / 容器时以 SAMPLES_DIR 为准（挂载目录）；未设置时回退模块常量，
+    # 也兼容测试对 app.app.SAMPLE_PATH 的 monkeypatch。
+    env_dir = os.environ.get("SAMPLES_DIR", "").strip()
+    if env_dir:
+        return pathlib.Path(env_dir) / "sample.json"
+    return SAMPLE_PATH
+
+
+def _load_sample() -> dict | None:
+    path = _current_sample_path()
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config["JSON_AS_ASCII"] = False
 
+    @app.get("/api/health")
+    @app.get("/healthz")
+    @app.get("/health")
+    def health():
+        """启动准备状态探针：准备失败时返回 503，供容器健康检查使用。"""
+        code, body = preparation.health_status(_current_sample_path())
+        return jsonify(body), code
+
     @app.get("/")
     def index():  # pragma: no cover - 纯渲染
         sample = None
-        if SAMPLE_PATH.exists():
-            sample = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+        try:
+            sample = _load_sample()
+        except (OSError, ValueError):
+            sample = None
         return render_template(
             "index.html",
             sample=sample,
@@ -39,9 +68,21 @@ def create_app() -> Flask:
 
     @app.get("/api/sample")
     def get_sample():
-        if not SAMPLE_PATH.exists():
-            return jsonify({"error": "样例尚未生成，请先运行 generate_samples.py"}), 404
-        return jsonify(json.loads(SAMPLE_PATH.read_text(encoding="utf-8")))
+        path = _current_sample_path()
+        if not path.is_file():
+            return (
+                jsonify(
+                    {
+                        "error": "样例尚未生成，请先运行 "
+                        "python scripts/prepare_samples.py samples"
+                    }
+                ),
+                404,
+            )
+        try:
+            return jsonify(json.loads(path.read_text(encoding="utf-8")))
+        except ValueError as exc:
+            return jsonify({"error": f"sample.json 无法解析: {exc}"}), 503
 
     @app.post("/api/summaries")
     def summaries():

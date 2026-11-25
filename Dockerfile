@@ -14,10 +14,15 @@ COPY app ./app
 COPY scripts ./scripts
 COPY samples ./samples
 
+RUN chmod +x /app/scripts/entrypoint.sh /app/scripts/prepare_samples.py
+
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8000
+    PORT=8000 \
+    SAMPLES_DIR=/app/samples \
+    PREPARE_STATUS_FILE=/tmp/tls-plan-prepare-status.json
 
 EXPOSE 8000
 
-# 容器启动时确保样例存在（镜像已自带，这里保证挂载覆盖后仍可重建）
-CMD ["sh", "-c", "python scripts/generate_samples.py samples || true; exec gunicorn --bind 0.0.0.0:${PORT} --workers 2 --timeout 60 app.app:app"]
+# 入口先做“可沿用则不重签、缺件补齐、不可用才重建”的样例准备，
+# 再启动 gunicorn；准备成败由 /api/health 结合状态标记反映。
+CMD ["/app/scripts/entrypoint.sh"]

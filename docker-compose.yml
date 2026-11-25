@@ -7,10 +7,17 @@ services:
       - "8000:8000"
     environment:
       PORT: "8000"
+      # 样例目录与状态标记位置显式固定；挂载 ./samples 后值班员备份的根包、
+      # sample.json 与目录内 PEM 都落在宿主原目录，重启沿用而不是重新签发。
+      SAMPLES_DIR: /app/samples
+      PREPARE_STATUS_FILE: /tmp/tls-plan-prepare-status.json
+    volumes:
+      - ./samples:/app/samples
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/sample', timeout=5)"]
-      interval: 30s
+      # 准备失败时 /api/health 返回 503，urlopen 抛错 -> 检查不通过
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 3s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
